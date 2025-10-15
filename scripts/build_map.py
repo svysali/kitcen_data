@@ -40,8 +40,20 @@ def load_results(csv_path: str) -> Dict[int, dict]:
                 continue
             parties = ['Liberal', 'Conservative', 'Green']
             vals = {p: float(row[p]) if row.get(p) not in (None, '') else 0.0 for p in parties}
-            winner = max(vals.items(), key=lambda kv: kv[1])[0]
-            results[poll] = {'winner': winner, 'votes': row['Vote total'] , **vals}
+            sorted_parties = sorted(vals.items(), key=lambda kv: kv[1], reverse=True)
+            winner, winner_pct = sorted_parties[0]
+            runner_up, runner_up_pct = sorted_parties[1] if len(sorted_parties) > 1 else (None, 0)
+            winner_lead = winner_pct - runner_up_pct
+
+            results[poll] = {
+                'winner': winner,
+                'winner_pct': winner_pct,
+                'runner_up': runner_up,
+                'runner_up_pct': runner_up_pct,
+                'winner_lead': winner_lead,
+                'votes': row['Vote total'],
+                **vals,
+            }
     return results
 
 
@@ -291,7 +303,7 @@ def main():
     m.fit_bounds([[s_lat, s_lon], [n_lat, e_lon]])
 
     # Define thresholds
-    thresholds = [10, 15, 20, 30, 40]
+    thresholds = [1, 5, 10, 15, 20]
 
     # Define easily distinguishable shades from light to dark for each color
     # For Red
@@ -303,34 +315,44 @@ def main():
     # For Blue
     blue_shades = ['#deebf7', '#9ecae1', '#6baed6', '#3182bd', '#08519c']
 
+    purple_shades = ['#F1EBF4', '#D9AEE1', '#9E57B4', '#6A1D8A', '#3D0A59']
+
     # Create StepColormaps for each color
     red_cm = cm.StepColormap(
         colors=red_shades,
         index=thresholds,
-        vmin=10,
-        vmax=40,
+        vmin=1,
+        vmax=20,
         caption='Red Shade Map'
     )
 
     green_cm = cm.StepColormap(
         colors=green_shades,
         index=thresholds,
-        vmin=10,
-        vmax=40,
+        vmin=1,
+        vmax=20,
         caption='Green Shade Map'
     )
 
     blue_cm = cm.StepColormap(
         colors=blue_shades,
         index=thresholds,
+        vmin=1,
+        vmax=20,
+        caption='Blue Shade Map'
+    )
+
+    purple_cm = cm.StepColormap(
+        colors=purple_shades,
+        index=[10, 15, 20, 30, 40],
         vmin=10,
         vmax=40,
         caption='Blue Shade Map'
     )
     COLORS = {
-        'Liberal': '#d71920',
-        'Conservative': '#1f77b4',
-        'Green': '#2ca02c',
+        'Liberal': red_cm,
+        'Conservative': blue_cm,
+        'Green': green_cm,
         'Other': '#aaaaaa',
     }
     COLORS_SCALE = {
@@ -367,8 +389,8 @@ def main():
             tip = f"PD {pd['pd_num']} — no result | streets: {len(street_names)}"
         else:
             winner = res['winner']
-            winner_pct = res[winner]
-            color = COLORS[winner]
+            winner_lead = res.get('winner_lead', 0.0)
+            color_map = COLORS_SCALE[winner]
             tip = (
                 f"PD {pd['pd_num']} — {winner} | streets: {len(street_names)}"
                 f"<div>L: {res['Liberal']}% | C: {res['Conservative']}% | G: {res['Green']}%</div>"
@@ -397,11 +419,11 @@ def main():
         #iframe = IFrame(html, width=320, height=350)
         popup = folium.Popup(html=html, max_width=350)
     
-        add_pd_polygon(pds_fg, pd['coords'], color)
+        add_pd_polygon(pds_fg, pd['coords'], color_map(winner_lead))
         if res:
-            add_pd_polygon(cons_fg, pd['coords'], blue_cm(res['Conservative']))
-            add_pd_polygon(libs_fg, pd['coords'], red_cm(res['Liberal']))
-            add_pd_polygon(greens_fg, pd['coords'], green_cm(res['Green']))
+            add_pd_polygon(cons_fg, pd['coords'], purple_cm(res['Conservative']))
+            add_pd_polygon(libs_fg, pd['coords'], purple_cm(res['Liberal']))
+            add_pd_polygon(greens_fg, pd['coords'], purple_cm(res['Green']))
         add_pd_polygon(popup_fg,pd['coords'],None, popup=popup)
 
     # 
