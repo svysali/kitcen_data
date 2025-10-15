@@ -4,9 +4,12 @@ import csv
 import json
 import xml.etree.ElementTree as ET
 from typing import List, Tuple, Optional, Dict
+import branca.colormap as cm
+from branca.element import IFrame
 
 import folium
 import requests
+from folium.plugins import GroupedLayerControl
 from shapely.geometry import LineString, Polygon
 from shapely.prepared import prep
 from html import escape
@@ -200,6 +203,47 @@ def streets_within_polygon(roads, poly: Polygon):
             continue
     return sorted(names)
 
+def add_pd_polygon(feature_group, coords, fill_color, popup=None, pane='pd'):
+    """
+    Draws a polygon normally (for color shading).
+    If popup is given, also adds a separate invisible GeoJSON layer to handle click popups.
+    """
+    # Draw visible polygon if color is given
+    if fill_color is not None:
+        folium.Polygon(
+            locations=coords,
+            color='#333333',
+            weight=1,
+            fill=True,
+            fill_color=fill_color,
+            fill_opacity=0.6,
+            pane=pane,
+        ).add_to(feature_group)
+
+    # Add invisible GeoJSON for popup click area
+    if popup is not None:
+        # Convert coords to GeoJSON-style [lon, lat]
+        geojson_feature = {
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[(lon, lat) for (lat, lon) in coords]],
+            },
+            "properties": {},
+        }
+        folium.GeoJson(
+            geojson_feature,
+            style_function=lambda x: {
+                "color": "transparent",
+                "fillColor": "transparent",
+                "fillOpacity": 0,
+                "weight": 0,
+            },
+            highlight_function=None,
+            tooltip=None,
+            popup=popup,  # attach popup here
+            pane='popup_pane',  # ensure it floats above others
+        ).add_to(feature_group)
 
 def main():
     # Optional mapping for advanced poll names
@@ -236,6 +280,8 @@ def main():
     # Panes for z-index
     folium.map.CustomPane('adv', z_index=400).add_to(m)
     folium.map.CustomPane('pd', z_index=650).add_to(m)
+    folium.map.CustomPane('popup_pane', z_index=800).add_to(m)
+    
 
     # Riding outline
     if fed_coords:
@@ -244,15 +290,72 @@ def main():
     # Fit to bounds
     m.fit_bounds([[s_lat, s_lon], [n_lat, e_lon]])
 
+    # Define thresholds
+    thresholds = [10, 15, 20, 30, 40]
+
+    # Define easily distinguishable shades from light to dark for each color
+    # For Red
+    red_shades = ['#fcbba1', '#fc9272', '#fb6a4a', '#de2d26', '#a50f15']
+
+    # For Green
+    green_shades = ['#c7e9c0', '#a1d99b', '#74c476', '#31a354', '#006d2c']
+
+    # For Blue
+    blue_shades = ['#deebf7', '#9ecae1', '#6baed6', '#3182bd', '#08519c']
+
+    # Create StepColormaps for each color
+    red_cm = cm.StepColormap(
+        colors=red_shades,
+        index=thresholds,
+        vmin=10,
+        vmax=40,
+        caption='Red Shade Map'
+    )
+
+    green_cm = cm.StepColormap(
+        colors=green_shades,
+        index=thresholds,
+        vmin=10,
+        vmax=40,
+        caption='Green Shade Map'
+    )
+
+    blue_cm = cm.StepColormap(
+        colors=blue_shades,
+        index=thresholds,
+        vmin=10,
+        vmax=40,
+        caption='Blue Shade Map'
+    )
     COLORS = {
         'Liberal': '#d71920',
         'Conservative': '#1f77b4',
         'Green': '#2ca02c',
         'Other': '#aaaaaa',
     }
+    COLORS_SCALE = {
+        'Liberal': red_cm,
+        'Conservative': blue_cm,
+        'Green': green_cm,
+    }
 
     # PD layer
-    pds_fg = folium.FeatureGroup(name='Polling Divisions', show=True)
+    adv_fg = folium.FeatureGroup(name='Advanced Polling Divisions', show=True, control=False, overlay=True)
+    pds_fg = folium.FeatureGroup(name='Winner', show=True)
+    cons_fg = folium.FeatureGroup(name='Conservative percentages', show=True)
+    libs_fg = folium.FeatureGroup(name='Libs percentages', show=True)
+    close_green_fg = folium.FeatureGroup(name='Close Green losses', show=False) 
+    greens_fg = folium.FeatureGroup(name='Green percentages', show=True)
+    popup_fg = folium.FeatureGroup(name='Info', show=True, control=False, overlay=True)
+
+   
+    m.add_child(greens_fg)
+    m.add_child(cons_fg)
+    m.add_child(libs_fg)
+    m.add_child(pds_fg)
+    m.add_child(popup_fg)
+     
+    close_green_pds: List[dict] = []
     for pd in pds:
         poly = Polygon([(lon, lat) for (lat, lon) in pd['coords']])
         if not poly.is_valid:
@@ -264,12 +367,17 @@ def main():
             tip = f"PD {pd['pd_num']} — no result | streets: {len(street_names)}"
         else:
             winner = res['winner']
-            color = COLORS.get(winner, COLORS['Other'])
+            winner_pct = res[winner]
+            color = COLORS[winner]
             tip = (
                 f"PD {pd['pd_num']} — {winner} | streets: {len(street_names)}"
                 f"<div>L: {res['Liberal']}% | C: {res['Conservative']}% | G: {res['Green']}%</div>"
                 f"<div><b>Total votes cast:</b> {res['votes']}</div>"
             )
+            # if res and res['winner'] != 'Green':
+            #     green_pct = res['Green']
+            #     if (winner_pct - green_pct) < 5.0:
+            #         close_green_pds.append(pd)
         tip_html = tip
         adv_info_html = ''
         if pd.get('adv_num'):
@@ -286,27 +394,37 @@ def main():
           <textarea style="width:100%;height:160px;border:1px solid #ddd;padding:6px;background:#fff;" readonly>{full_text_html}</textarea>
         </div>
         """
-        popup = folium.Popup(html=html, max_width=360)
-        folium.Polygon(
-            locations=pd['coords'],
-            color='#333333',
-            weight=1,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.6,
-            popup=popup,
-            pane='pd',
-        ).add_to(pds_fg)
+        #iframe = IFrame(html, width=320, height=350)
+        popup = folium.Popup(html=html, max_width=350)
+    
+        add_pd_polygon(pds_fg, pd['coords'], color)
+        if res:
+            add_pd_polygon(cons_fg, pd['coords'], blue_cm(res['Conservative']))
+            add_pd_polygon(libs_fg, pd['coords'], red_cm(res['Liberal']))
+            add_pd_polygon(greens_fg, pd['coords'], green_cm(res['Green']))
+        add_pd_polygon(popup_fg,pd['coords'],None, popup=popup)
 
+    # 
+    if close_green_pds:
+        for pd in close_green_pds:
+            folium.Polygon(
+            locations=pd['coords'],
+            color='#FFFFFF',
+            weight=2,
+            fill=False,
+            fill_color='#000000',
+            fill_opacity=1.0,
+            pane='pd',
+        ).add_to(close_green_fg)
+       
     # Advanced polling divisions layer
     if adv_pds:
-        adv_fg = folium.FeatureGroup(name='Advanced Polling Divisions', show=True)
         for apd in adv_pds:
             name = (apd.get('name') or '').strip()
             folium.Polygon(
                 locations=apd['coords'],
                 color='#5a001a',  # dark maroon outline
-                weight=4,
+                weight=6,
                 fill=True,
                 fill_color='#fbe3ea',  # pale maroon/pink fill
                 fill_opacity=0.15,
@@ -327,8 +445,13 @@ def main():
             ).add_to(adv_fg)
         adv_fg.add_to(m)
 
-    # Add PD on top
-    pds_fg.add_to(m)
+    m.get_root().header.add_child(folium.Element("""
+    <style>
+      .leaflet-pane.popup_pane {
+          pointer-events: auto !important;
+      }
+    </style>
+    """))
 
     # PD search control
     pd_index: Dict[str, dict] = {}
@@ -414,7 +537,13 @@ def main():
     """
     m.get_root().header.add_child(folium.Element(nav_css))
 
-    folium.LayerControl(collapsed=False).add_to(m)
+    GroupedLayerControl(
+        groups={
+            "Results": [pds_fg, cons_fg, greens_fg, libs_fg],
+        },
+        exclusive_groups=True,
+        collapsed=False
+    ).add_to(m)
 
     # Fit on load (safety)
     bounds_js = (
